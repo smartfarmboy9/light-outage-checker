@@ -23,10 +23,8 @@ DELAY = 1.5
 MAX_RETRIES = 2
 REQUEST_TIMEOUT = (10, 15)
 
-# Максимальний час одного запуску — 45 хвилин
-MAX_RUNTIME = 45 * 60
-
-# Після 10 невдалих вулиць поспіль зупиняємося
+MAX_RUNTIME = 15 * 60
+MAX_STREETS_PER_RUN = 300
 MAX_CONSECUTIVE_ERRORS = 10
 
 
@@ -91,7 +89,6 @@ def api_request(session, ajax_url, csrf_name, csrf_token, payload):
             )
 
             response.raise_for_status()
-
             result = response.json()
 
             if result.get("result") is not True:
@@ -101,15 +98,9 @@ def api_request(session, ajax_url, csrf_name, csrf_token, payload):
 
             return result
 
-        except (
-            requests.RequestException,
-            ValueError,
-            RuntimeError,
-        ) as error:
-
+        except (requests.RequestException, ValueError, RuntimeError) as error:
             print(
-                f"Помилка запиту "
-                f"({attempt}/{MAX_RETRIES}): {error}",
+                f"Помилка запиту ({attempt}/{MAX_RETRIES}): {error}",
                 flush=True,
             )
 
@@ -129,9 +120,9 @@ def save_progress(completed, addresses):
 def main():
     start_time = time.monotonic()
 
-    print("=" * 50, flush=True)
-    print("ОНОВЛЕННЯ БАЗИ АДРЕС ДТЕК", flush=True)
-    print("=" * 50, flush=True)
+    print("=" * 50)
+    print("ОНОВЛЕННЯ БАЗИ АДРЕС ДТЕК")
+    print("=" * 50)
 
     session, ajax_url, csrf_name, csrf_token = connect()
 
@@ -162,33 +153,39 @@ def main():
         completed = set(progress.get("completed", []))
         addresses = progress.get("addresses", {})
 
+        # Залишаємо лише актуальні вулиці
+        current_streets = set(streets)
+        completed &= current_streets
+        addresses = {
+            street: houses
+            for street, houses in addresses.items()
+            if street in current_streets
+        }
+
         consecutive_errors = 0
-        failed_streets = []
+        processed_this_run = 0
 
         for index, street in enumerate(streets, 1):
-
             if street in completed:
                 continue
 
             elapsed = time.monotonic() - start_time
 
-            if elapsed >= MAX_RUNTIME:
+            if (
+                elapsed >= MAX_RUNTIME
+                or processed_this_run >= MAX_STREETS_PER_RUN
+            ):
                 save_progress(completed, addresses)
 
                 print(
-                    "\nДосягнуто обмеження часу.",
+                    f"\nПроміжний результат: "
+                    f"{len(completed)}/{len(streets)} вулиць.",
                     flush=True,
                 )
+                print("Прогрес збережено. Продовжимо наступного запуску.")
+                return
 
-                raise RuntimeError(
-                    "Оновлення не завершено. "
-                    "Прогрес збережено локально."
-                )
-
-            print(
-                f"[{index}/{len(streets)}] {street}",
-                flush=True,
-            )
+            print(f"[{index}/{len(streets)}] {street}", flush=True)
 
             payload = [
                 ("method", "getHomeNum"),
@@ -206,69 +203,42 @@ def main():
                 payload,
             )
 
-            if result is None:
-                failed_streets.append(street)
+            if result is None or not isinstance(result.get("data"), dict):
                 consecutive_errors += 1
 
-                print(
-                    f"Пропущено: {street}",
-                    flush=True,
-                )
+                print(f"Не вдалося обробити: {street}", flush=True)
 
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                     save_progress(completed, addresses)
-
                     raise RuntimeError(
-                        "Забагато помилок поспіль. "
-                        "Перевір доступність API ДТЕК."
+                        "Забагато помилок поспіль. Прогрес збережено."
                     )
 
                 time.sleep(DELAY)
                 continue
 
-            houses = result.get("data")
-
-            if not isinstance(houses, dict):
-                failed_streets.append(street)
-                consecutive_errors += 1
-                continue
-
             consecutive_errors = 0
 
-            addresses[street] = houses
+            addresses[street] = result["data"]
             completed.add(street)
+            processed_this_run += 1
 
+            # Зберігаємо після кожної успішної вулиці
             save_progress(completed, addresses)
 
             time.sleep(DELAY)
 
-        if failed_streets:
-            save_progress(completed, addresses)
-
-            print("\nНе вдалося обробити вулиці:", flush=True)
-
-            for street in failed_streets:
-                print("-", street, flush=True)
-
-            raise RuntimeError(
-                f"Оновлення неповне: "
-                f"{len(failed_streets)} вулиць не оброблено."
-            )
-
-        missing = set(streets) - completed
+        missing = current_streets - completed
 
         if missing:
             save_progress(completed, addresses)
 
-            raise RuntimeError(
-                f"Не оброблено {len(missing)} вулиць."
+            print(
+                f"\nЗалишилося обробити вулиць: {len(missing)}",
+                flush=True,
             )
-
-        # Перевіряємо результат перед заміною бази
-        if len(addresses) < 2000:
-            raise RuntimeError(
-                "Підозріло мала кількість вулиць."
-            )
+            print("Прогрес збережено. Продовжимо наступного запуску.")
+            return
 
         total_houses = sum(
             len(houses)
@@ -276,28 +246,26 @@ def main():
             if isinstance(houses, dict)
         )
 
-        if total_houses < 10000:
+        if len(addresses) < 2000 or total_houses < 10000:
             raise RuntimeError(
-                "Підозріло мала кількість адрес."
+                "Перевірка бази не пройдена. Основну базу не змінено."
             )
 
-        # Замінюємо основну базу лише після успішної перевірки
+        # Оновлюємо основну базу тільки після повного збору
         save_json(ADDRESSES_FILE, addresses)
 
         if PROGRESS_FILE.exists():
             PROGRESS_FILE.unlink()
 
-        print("\n" + "=" * 50, flush=True)
-        print("БАЗУ УСПІШНО ОНОВЛЕНО", flush=True)
-        print("=" * 50, flush=True)
+        print("\n" + "=" * 50)
+        print("БАЗУ УСПІШНО ОНОВЛЕНО")
+        print("=" * 50)
 
-        print("Вулиць:", len(addresses), flush=True)
-        print("Адрес:", total_houses, flush=True)
-
+        print("Вулиць:", len(addresses))
+        print("Адрес:", total_houses)
         print(
             "Дата оновлення:",
             datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M"),
-            flush=True,
         )
 
     finally:
