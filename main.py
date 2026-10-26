@@ -13,8 +13,112 @@ URL = "https://www.dtek-kem.com.ua/ua/shutdowns"
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 
+def normalize_street(value):
+    value = value.casefold().replace("’", "'").replace("ʼ", "'")
+    value = re.sub(r"\s+", " ", value).strip()
+
+    prefixes = (
+        "вул.", "вулиця",
+        "просп.", "проспект",
+        "пров.", "провулок",
+        "бул.", "бульвар",
+        "пл.", "площа",
+        "шосе",
+    )
+
+    for prefix in prefixes:
+        if value.startswith(prefix + " "):
+            value = value[len(prefix):].strip()
+            break
+
+    return value
+
+
+def normalize_house(value):
+    value = value.casefold()
+    value = value.replace(" ", "").replace("-", "").replace("/", "")
+    return value
+
+
+def load_addresses():
+    with open(ADDRESSES_FILE, "r", encoding="utf-8") as file:
+        data = json.load(file)
+
+    # Підтримка нової та старої структури
+    if "Київ" in data and isinstance(data["Київ"], dict):
+        return data["Київ"]
+
+    return data
+
+
+def find_groups(street, house):
+    addresses = load_addresses()
+
+    street_query = normalize_street(street)
+    house_query = normalize_house(house)
+
+    matches = []
+
+    for saved_street, houses in addresses.items():
+        if normalize_street(saved_street) == street_query:
+            matches.append((saved_street, houses))
+
+    if not matches:
+        suggestions = [
+            name for name in addresses
+            if street_query in normalize_street(name)
+        ][:10]
+
+        print("\nВулицю не знайдено.")
+
+        if suggestions:
+            print("Можливо, ви мали на увазі:")
+            for name in suggestions:
+                print(" -", name)
+
+        return None
+
+    if len(matches) > 1:
+        print("\nЗнайдено декілька вулиць:")
+        for name, _ in matches:
+            print(" -", name)
+        print("Введіть повну назву з типом вулиці.")
+        return None
+
+    saved_street, houses = matches[0]
+
+    for saved_house, info in houses.items():
+        if normalize_house(saved_house) != house_query:
+            continue
+
+        # Нова база ДТЕК
+        if isinstance(info, dict):
+            groups = info.get("sub_type_reason", [])
+
+        # Стара база
+        elif isinstance(info, str):
+            groups = [info]
+
+        # Можлива структура зі списком груп
+        elif isinstance(info, list):
+            groups = info
+
+        else:
+            groups = []
+
+        groups = [
+            group for group in groups
+            if isinstance(group, str) and group.startswith("GPV")
+        ]
+
+        return saved_street, saved_house, list(dict.fromkeys(groups))
+
+    print(f"\nБудинок {house} не знайдено на вулиці {saved_street}.")
+    return None
+
+
 def get_schedules():
-    response = requests.get(URL, timeout=20)
+    response = requests.get(URL, timeout=30)
     response.raise_for_status()
 
     html = response.text
@@ -45,27 +149,6 @@ def get_today_schedule(data):
 
         if date == today:
             return groups
-
-    return None
-
-
-def find_group(street, house):
-    with open(ADDRESSES_FILE, "r", encoding="utf-8") as file:
-        addresses = json.load(file)
-
-    streets = addresses.get("Київ", {})
-
-    # Пошук без урахування регістру та зайвих пробілів
-    street_normalized = " ".join(street.lower().split())
-    house_normalized = house.strip().upper().replace(" ", "")
-
-    for saved_street, houses in streets.items():
-        saved_normalized = " ".join(saved_street.lower().split())
-
-        if saved_normalized == street_normalized:
-            for saved_house, group in houses.items():
-                if saved_house.upper().replace(" ", "") == house_normalized:
-                    return group
 
     return None
 
@@ -127,9 +210,9 @@ def show_schedule(street, house, group, outages):
     now = datetime.now(KYIV_TZ)
     today = now.date()
 
-    print("\n" + "=" * 45)
-    print("       ГРАФІК ВІДКЛЮЧЕНЬ — КИЇВ")
-    print("=" * 45)
+    print("\n" + "=" * 50)
+    print("ГРАФІК ВІДКЛЮЧЕНЬ — КИЇВ")
+    print("=" * 50)
 
     print(f"Адреса: Київ, {street}, {house}")
     print(f"Група: {group}")
@@ -140,6 +223,7 @@ def show_schedule(street, house, group, outages):
 
     if not outages:
         print("За отриманим графіком відключень немає.")
+        print("Увага: фактична ситуація може відрізнятися.")
         return
 
     for start, end in outages:
@@ -148,7 +232,7 @@ def show_schedule(street, house, group, outages):
             f"{format_time(end, today)}"
         )
 
-    print("\n" + "-" * 45)
+    print("\n" + "-" * 50)
 
     for start, end in outages:
         if start <= now < end:
@@ -168,14 +252,13 @@ def show_schedule(street, house, group, outages):
 
     print("\nДжерело графіка: ДТЕК")
     print("Група визначена за локальною базою addresses.json.")
-    print("Увага: фактичні відключення можуть відрізнятися.")
+    print("Фактичні відключення можуть відрізнятися.")
 
 
 def main():
-    print("=" * 45)
-    print("       ПЕРЕВІРКА ВІДКЛЮЧЕНЬ СВІТЛА")
-    print("                  КИЇВ")
-    print("=" * 45)
+    print("=" * 50)
+    print("ПЕРЕВІРКА ВІДКЛЮЧЕНЬ СВІТЛА — КИЇВ")
+    print("=" * 50)
 
     try:
         street = input("\nВведіть вулицю: ").strip()
@@ -185,15 +268,21 @@ def main():
             print("Помилка: введіть вулицю та номер будинку.")
             return
 
-        group = find_group(street, house)
+        result = find_groups(street, house)
 
-        if not group:
-            print("\nАдресу не знайдено в локальній базі.")
-            print("Автоматичний пошук усіх адрес Києва ще не реалізований.")
+        if result is None:
             return
 
-        print(f"\nЗнайдена група: {group}")
-        print("Завантаження графіка ДТЕК...")
+        saved_street, saved_house, groups = result
+
+        if not groups:
+            print("\nДля цієї адреси групу відключень не визначено.")
+            return
+
+        print("\nЗнайдена адреса:", saved_street, saved_house)
+        print("Групи:", ", ".join(groups))
+
+        print("\nЗавантажуємо актуальний графік ДТЕК...")
 
         data = get_schedules()
         today_schedule = get_today_schedule(data)
@@ -202,16 +291,23 @@ def main():
             print("Немає актуального графіка на сьогодні.")
             return
 
-        hours = today_schedule.get(group)
-
-        if hours is None:
-            print("Графік для цієї групи не знайдено.")
-            return
-
         today = datetime.now(KYIV_TZ).date()
-        outages = calculate_outages(hours, today)
 
-        show_schedule(street, house, group, outages)
+        for group in groups:
+            hours = today_schedule.get(group)
+
+            if hours is None:
+                print(f"\nГрафік для групи {group} не знайдено.")
+                continue
+
+            outages = calculate_outages(hours, today)
+
+            show_schedule(
+                saved_street,
+                saved_house,
+                group,
+                outages
+            )
 
     except FileNotFoundError:
         print("Помилка: файл addresses.json не знайдено.")
