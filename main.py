@@ -1,24 +1,13 @@
-from datetime import datetime
+import urllib.request
 
-print("=== Перевірка відключень світла ===")
+url = "https://www.dtek-kem.com.ua/ua/shutdowns"
 
-print("1. Київ")
-print("2. Київська область")
-
-location = input("Оберіть розташування (1 або 2): ")
-
-queue = input("Введіть свою чергу відключення (наприклад, 1.1): ")
-
-print("\nВаші дані:")
-    
-if location == "1":
-    print("Розташування: Київ")
-elif location == "2":
-    print("Розташування: Київська область")
-else:
-    print("Невідоме розташування!")
-
-print("Черга відключення:", queue)
-
-print("\nПрограму запущено успішно!")
-print("Поточний час:", datetime.now().strftime("%H:%M:%S"))
+try:
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    response = urllib.request.urlopen(request, timeout=10)
+    print("Підключення працює!")
+    print("Код відповіді:", response.status)
+    response.close()
+except Exception as error:
+    print("Не вдалося підключитися.")
+    print("Помилка:", error)
