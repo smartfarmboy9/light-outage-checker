@@ -1,0 +1,7 @@
+
+# Особисті дані та секрети
+users.json
+.env
+.env.*
+__pycache__/
+*.pyc
