@@ -1,127 +1,132 @@
-import os
 import json
-from datetime import datetime, timedelta
+import re
+import requests
+
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+URL = "https://www.dtek-kem.com.ua/ua/shutdowns"
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привіт! Я бот для перевірки відключень світла.\n\n"
-        "Для перевірки введи:\n"
-        "/check Київ | вул. Іленка Юрія | 1"
+def get_schedules():
+    response = requests.get(URL, timeout=20)
+    response.raise_for_status()
+
+    html = response.text
+
+    match = re.search(
+        r"DisconSchedule\.fact\s*=\s*",
+        html
+    )
+
+    if not match:
+        raise ValueError("Графіки ДТЕК не знайдено.")
+
+    start = html.find("{", match.end())
+
+    if start == -1:
+        raise ValueError("Дані графіків пошкоджені.")
+
+    decoder = json.JSONDecoder()
+    schedules, _ = decoder.raw_decode(html[start:])
+
+    return schedules["data"]
+
+
+def get_today_schedule(data):
+    today = datetime.now(KYIV_TZ).date()
+
+    for timestamp, groups in data.items():
+        date = datetime.fromtimestamp(
+            int(timestamp),
+            KYIV_TZ
+        ).date()
+
+        if date == today:
+            return groups
+
+    return None
+
+
+def show_schedule(group, hours):
+    print(f"\nГрупа відключень: {group}")
+    print(f"Дата: {datetime.now(KYIV_TZ):%d.%m.%Y}")
+    print("-" * 40)
+
+    print("Погодинні дані ДТЕК:\n")
+
+    for hour in range(1, 25):
+        status = hours.get(str(hour), "unknown")
+
+        start_hour = hour - 1
+        end_hour = hour
+
+        start_time = f"{start_hour:02d}:00"
+        end_time = f"{end_hour:02d}:00"
+
+        if end_hour == 24:
+            end_time = "24:00"
+
+        print(
+            f"{start_time} - {end_time}: {status}"
+        )
+
+    print("\nПозначення:")
+    print("yes, no, first, second — значення ДТЕК.")
+    print(
+        "Їхнє точне значення ще перевіряється, "
+        "тому програма поки не визначає "
+        "час відключення автоматично."
     )
 
 
-async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message.text
-
-    address_text = message.replace("/check", "", 1).strip()
-    parts = [part.strip() for part in address_text.split("|")]
-
-    if len(parts) != 3:
-        await update.message.reply_text(
-            "Введи адресу у форматі:\n"
-            "/check Київ | вул. Іленка Юрія | 1"
-        )
-        return
-
-    location, street, house = parts
+def main():
+    print("=" * 45)
+    print("     ГРАФІКИ ВІДКЛЮЧЕНЬ СВІТЛА")
+    print("               КИЇВ")
+    print("=" * 45)
 
     try:
-        with open("schedule.json", "r", encoding="utf-8") as file:
-            schedules = json.load(file)
-    except (FileNotFoundError, json.JSONDecodeError):
-        await update.message.reply_text("Не вдалося прочитати schedule.json.")
-        return
+        data = get_schedules()
+        today_schedule = get_today_schedule(data)
 
-    address = schedules.get(location, {}).get(street, {}).get(house)
+        if not today_schedule:
+            print("\nНемає графіків ДТЕК на сьогодні.")
+            return
 
-    if address is None:
-        await update.message.reply_text(
-            "Графік для цієї адреси не знайдено."
-        )
-        return
+        groups = sorted(today_schedule.keys())
 
-    now = datetime.now(ZoneInfo("Europe/Kyiv"))
+        print("\nДоступні групи:\n")
 
-    if address["date"] != now.strftime("%Y-%m-%d"):
-        await update.message.reply_text(
-            "Немає актуального графіка на сьогодні."
-        )
-        return
+        for index, group in enumerate(groups, 1):
+            print(f"{index}. {group}")
 
-    outages = address["outages"]
+        choice = input(
+            "\nВведіть номер своєї групи: "
+        ).strip()
 
-    if not outages:
-        await update.message.reply_text(
-            "У збереженому графіку немає запланованих відключень."
-        )
-        return
+        if not choice.isdigit():
+            print("Помилка: введіть число.")
+            return
 
-    result = "На сьогодні більше відключень за графіком немає."
+        index = int(choice) - 1
 
-    for start_time, end_time in outages:
-        start_hour, start_minute = map(int, start_time.split(":"))
+        if index < 0 or index >= len(groups):
+            print("Такої групи немає.")
+            return
 
-        start = now.replace(
-            hour=start_hour,
-            minute=start_minute,
-            second=0,
-            microsecond=0
-        )
+        group = groups[index]
+        hours = today_schedule[group]
 
-        if end_time == "24:00":
-            end = now.replace(
-                hour=0,
-                minute=0,
-                second=0,
-                microsecond=0
-            ) + timedelta(days=1)
-        else:
-            end_hour, end_minute = map(int, end_time.split(":"))
-            end = now.replace(
-                hour=end_hour,
-                minute=end_minute,
-                second=0,
-                microsecond=0
-            )
+        show_schedule(group, hours)
 
-        if start <= now < end:
-            minutes = int((end - now).total_seconds() // 60)
-            result = (
-                "Зараз за графіком світла немає.\n"
-                f"До відновлення: {minutes // 60} год {minutes % 60} хв"
-            )
-            break
+    except requests.RequestException as error:
+        print("\nПомилка підключення:", error)
 
-        if now < start:
-            minutes = int((start - now).total_seconds() // 60)
-            result = (
-                f"Наступне відключення о {start_time}.\n"
-                f"До відключення: {minutes // 60} год {minutes % 60} хв"
-            )
-            break
-
-    await update.message.reply_text(
-        f"Адреса: {location}, {street}, {house}\n"
-        f"Час: {now.strftime('%H:%M')}\n\n"
-        f"{result}\n\n"
-        "Джерело: вручну збережений графік, не онлайн-дані ДТЕК."
-    )
+    except (ValueError, KeyError, TypeError) as error:
+        print("\nПомилка обробки графіків:", error)
 
 
-token = os.environ.get("BOT_TOKEN")
-
-if not token:
-    raise RuntimeError("Не знайдено BOT_TOKEN")
-
-app = ApplicationBuilder().token(token).build()
-
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("check", check))
-
-print("Бот запущений!")
-app.run_polling()
+if __name__ == "__main__":
+    main()
