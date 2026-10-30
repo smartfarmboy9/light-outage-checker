@@ -7,342 +7,368 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 
-BASE_DIR = Path(__file__).resolve().parent
-ADDRESSES_FILE = BASE_DIR / "addresses.json"
-
-URL = "https://www.dtek-kem.com.ua/ua/shutdowns"
-KYIV_TZ = ZoneInfo("Europe/Kyiv")
+API = "https://app.yasno.ua/api/blackout-service/public/shutdowns/regions/25/dsos/902/planned-outages"
+ADDRESSES = Path(__file__).with_name("addresses.json")
+TZ = ZoneInfo("Europe/Kyiv")
 
 
-def normalize_street(value):
-    value = value.casefold()
-    value = value.replace("’", "'").replace("ʼ", "'")
-    value = re.sub(r"\s+", " ", value).strip()
+def normalize(text):
+    text = text.casefold().replace("’", "'").replace("ʼ", "'")
+    text = re.sub(r"\s+", " ", text).strip()
 
     prefixes = (
-        "вул.", "вулиця",
-        "просп.", "проспект",
-        "пров.", "провулок",
-        "бул.", "бульвар",
-        "пл.", "площа",
-        "шосе",
+        "вул.", "вулиця", "просп.", "проспект",
+        "пров.", "провулок", "бул.", "бульвар",
+        "пл.", "площа", "шосе"
     )
 
     for prefix in prefixes:
-        if value.startswith(prefix + " "):
-            value = value[len(prefix):].strip()
-            break
+        if text.startswith(prefix + " "):
+            return text[len(prefix):].strip()
 
-    return value
+    return text
 
 
-def normalize_house(value):
-    value = value.casefold()
-    value = value.replace(" ", "")
-    value = value.replace("-", "")
-    value = value.replace("/", "")
-    return value
+def normalize_house(text):
+    return re.sub(r"[\s/-]", "", text.casefold())
 
 
 def load_addresses():
-    with open(ADDRESSES_FILE, "r", encoding="utf-8") as file:
+    with open(ADDRESSES, encoding="utf-8") as file:
         data = json.load(file)
 
-    if "Київ" in data and isinstance(data["Київ"], dict):
-        return data["Київ"]
-
-    return data
+    return data.get("Київ", data)
 
 
-def find_groups(street, house):
-    addresses = load_addresses()
+def find_street(addresses):
+    while True:
+        query = normalize(input("\nВведіть вулицю: "))
 
-    street_query = normalize_street(street)
-    house_query = normalize_house(house)
-
-    matches = []
-
-    for saved_street, houses in addresses.items():
-        if normalize_street(saved_street) == street_query:
-            matches.append((saved_street, houses))
-
-    if not matches:
-        suggestions = [
-            name for name in addresses
-            if street_query in normalize_street(name)
-        ][:10]
-
-        print("\nВулицю не знайдено.")
-
-        if suggestions:
-            print("Можливо, ви мали на увазі:")
-            for name in suggestions:
-                print(" -", name)
-
-        return None
-
-    if len(matches) > 1:
-        print("\nЗнайдено декілька вулиць:")
-        for name, _ in matches:
-            print(" -", name)
-
-        print("Введіть повну назву з типом вулиці.")
-        return None
-
-    saved_street, houses = matches[0]
-
-    for saved_house, info in houses.items():
-        if normalize_house(saved_house) != house_query:
+        if not query:
             continue
 
-        if isinstance(info, dict):
-            groups = info.get("sub_type_reason", [])
-
-        elif isinstance(info, str):
-            groups = [info]
-
-        elif isinstance(info, list):
-            groups = info
-
-        else:
-            groups = []
-
-        if isinstance(groups, str):
-            groups = [groups]
-
-        groups = [
-            group for group in groups
-            if isinstance(group, str) and group.startswith("GPV")
+        matches = [
+            name for name in addresses
+            if query in normalize(name)
         ]
 
-        return saved_street, saved_house, list(dict.fromkeys(groups))
+        if not matches:
+            print("Вулицю не знайдено. Спробуйте ще раз.")
+            continue
 
-    print(f"\nБудинок {house} не знайдено на вулиці {saved_street}.")
-    return None
+        matches.sort(
+            key=lambda name: (
+                not normalize(name).startswith(query),
+                len(name),
+                name
+            )
+        )
+
+        print("\nЗнайдено:")
+
+        for i, name in enumerate(matches, 1):
+            print(f"{i}. {name}")
+
+        if len(matches) == 1:
+            answer = input("\nЦе ваша вулиця? (так/ні): ").lower()
+
+            if answer in ("так", "т", "yes", "y"):
+                return matches[0]
+
+            continue
+
+        while True:
+            choice = input("\nОберіть номер (0 - назад): ")
+
+            if choice == "0":
+                break
+
+            if choice.isdigit() and 1 <= int(choice) <= len(matches):
+                return matches[int(choice) - 1]
+
+            print("Неправильний номер.")
 
 
-def get_schedules():
+def find_house(houses):
+    while True:
+        query = normalize_house(
+            input("\nВведіть номер будинку: ").strip()
+        )
+
+        for house, info in houses.items():
+            if normalize_house(house) == query:
+                return house, info
+
+        print("Будинок не знайдено. Спробуйте ще раз.")
+
+
+def get_group(info):
+    if isinstance(info, dict):
+        saved = info.get("yasno_group")
+
+        if saved:
+            return str(saved)
+
+        groups = info.get("sub_type_reason", [])
+
+    elif isinstance(info, list):
+        groups = info
+
+    elif isinstance(info, str):
+        groups = [info]
+
+    else:
+        groups = []
+
+    if isinstance(groups, str):
+        groups = [groups]
+
+    found = []
+
+    for group in groups:
+        if not isinstance(group, str):
+            continue
+
+        match = re.fullmatch(
+            r"GPV(\d+\.\d+)",
+            group.strip(),
+            re.IGNORECASE
+        )
+
+        if match:
+            found.append(match.group(1))
+
+    found = list(dict.fromkeys(found))
+
+    if len(found) == 1:
+        return found[0]
+
+    if len(found) > 1:
+        raise ValueError(
+            "Адреса має декілька груп. "
+            "Неможливо вибрати одну автоматично."
+        )
+
+    raise ValueError("Групу для адреси не знайдено.")
+
+
+def get_schedule():
     response = requests.get(
-        URL,
+        API,
         timeout=30,
         headers={
-            "User-Agent": "Mozilla/5.0"
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json"
         }
     )
 
     response.raise_for_status()
 
-    html = response.text
+    data = response.json()
 
-    match = re.search(
-        r"DisconSchedul(?:e|&#x65;)\.(?:f|&#x66;)act\s*=\s*",
-        html
+    if not isinstance(data, dict):
+        raise ValueError("Невідомий формат відповіді YASNO.")
+
+    return data
+
+
+def parse_day(data):
+    if not isinstance(data, dict):
+        return None
+
+    date_text = data.get("date")
+
+    if not date_text:
+        return None
+
+    date = datetime.fromisoformat(
+        date_text.replace("Z", "+00:00")
     )
 
-    if not match:
-        raise ValueError("Графіки ДТЕК не знайдено на сторінці.")
+    if date.tzinfo:
+        date = date.astimezone(TZ)
 
-    start = html.find("{", match.end())
+    day = date.date()
+    status = data.get("status")
+    slots = data.get("slots", [])
 
-    if start == -1:
-        raise ValueError("Дані графіків не знайдено.")
+    if not isinstance(slots, list):
+        raise ValueError("Невідомий формат графіка.")
 
-    decoder = json.JSONDecoder()
-    schedules, _ = decoder.raw_decode(html[start:])
+    start_day = datetime(
+        day.year, day.month, day.day, tzinfo=TZ
+    )
 
-    return schedules["data"]
-
-
-def get_today_schedule(data):
-    today = datetime.now(KYIV_TZ).date()
-
-    for timestamp, groups in data.items():
-        date = datetime.fromtimestamp(
-            int(timestamp),
-            KYIV_TZ
-        ).date()
-
-        if date == today:
-            return groups
-
-    return None
-
-
-def calculate_outages(hours, date):
     outages = []
-    outage_start = None
+    possible = []
 
-    for hour in range(1, 25):
-        status = hours.get(str(hour))
+    for slot in slots:
+        kind = slot.get("type")
 
-        if status not in ("yes", "no", "first", "second"):
-            raise ValueError(
-                f"Невідомий стан для години {hour}: {status}"
-            )
+        if kind not in ("Definite", "Possible"):
+            continue
 
-        hour_start = datetime(
-            date.year,
-            date.month,
-            date.day,
-            hour - 1,
-            0,
-            tzinfo=KYIV_TZ
-        )
+        start_min = int(slot["start"])
+        end_min = int(slot["end"])
 
-        first_half = status in ("no", "first")
-        second_half = status in ("no", "second")
+        if not 0 <= start_min < end_min <= 1440:
+            continue
 
-        for half, is_outage in enumerate((first_half, second_half)):
-            start = hour_start + timedelta(minutes=half * 30)
+        start = start_day + timedelta(minutes=start_min)
+        end = start_day + timedelta(minutes=end_min)
 
-            if is_outage and outage_start is None:
-                outage_start = start
+        if kind == "Definite":
+            outages.append((start, end))
+        else:
+            possible.append((start, end))
 
-            elif not is_outage and outage_start is not None:
-                outages.append((outage_start, start))
-                outage_start = None
-
-    if outage_start is not None:
-        next_day = datetime(
-            date.year,
-            date.month,
-            date.day,
-            tzinfo=KYIV_TZ
-        ) + timedelta(days=1)
-
-        outages.append((outage_start, next_day))
-
-    return outages
+    return {
+        "date": day,
+        "status": status,
+        "outages": sorted(outages),
+        "possible": sorted(possible)
+    }
 
 
-def format_time(value, date):
-    if value.date() > date:
-        return "24:00"
-
-    return value.strftime("%H:%M")
-
-
-def format_duration(delta):
+def duration(delta):
     minutes = max(0, int(delta.total_seconds() // 60))
     return f"{minutes // 60} год {minutes % 60} хв"
 
 
-def show_schedule(street, house, group, outages):
-    now = datetime.now(KYIV_TZ)
-    today = now.date()
+def show_day(title, data):
+    print(f"\n{title}")
 
-    print("\n" + "=" * 50)
-    print("ГРАФІК ВІДКЛЮЧЕНЬ - КИЇВ")
-    print("=" * 50)
-
-    print(f"Адреса: Київ, {street}, {house}")
-    print(f"Група: {group}")
-    print(f"Дата: {today:%d.%m.%Y}")
-    print(f"Поточний час: {now:%H:%M}")
-
-    print("\nГРАФІК ВІДКЛЮЧЕНЬ:")
-
-    if not outages:
-        print("За отриманим графіком відключень немає.")
-        print("Увага: фактична ситуація може відрізнятися.")
+    if data is None:
+        print("Графік недоступний.")
         return
 
+    print("Дата:", data["date"].strftime("%d.%m.%Y"))
+
+    if data["status"] == "EmergencyShutdowns":
+        print("Екстрені відключення. Плановий графік не діє.")
+        return
+
+    if data["status"] == "NoShutdowns":
+        print("Планових відключень немає.")
+        return
+
+    if not data["outages"]:
+        print("Підтверджених відключень немає.")
+
+    for start, end in data["outages"]:
+        print(f"{start:%H:%M} - {end:%H:%M}")
+
+    if data["possible"]:
+        print("Можливі відключення:")
+
+        for start, end in data["possible"]:
+            print(f"{start:%H:%M} - {end:%H:%M}")
+
+
+def show_status(today, tomorrow):
+    now = datetime.now(TZ)
+
+    print(f"\nПоточний час: {now:%H:%M}")
+
+    if not today or today["date"] != now.date():
+        print("Актуального графіка на сьогодні немає.")
+        return
+
+    if today["status"] == "EmergencyShutdowns":
+        print("Екстрені відключення.")
+        print("Час відновлення невідомий.")
+        return
+
+    outages = list(today["outages"])
+
+    if tomorrow and tomorrow["date"] == now.date() + timedelta(days=1):
+        if tomorrow["status"] not in (
+            "EmergencyShutdowns", "NoShutdowns"
+        ):
+            outages += tomorrow["outages"]
+
+    outages.sort()
+
     for start, end in outages:
-        print(
-            f"  {format_time(start, today)} - "
-            f"{format_time(end, today)}"
-        )
-
-    print("\n" + "-" * 50)
-
-    for start, end in outages:
-
         if start <= now < end:
-            print("Зараз: за графіком світла немає")
-            print("Відновлення:", format_time(end, today))
-            print("До відновлення:", format_duration(end - now))
-            break
+            print("\nЗа графіком світла немає.")
+            print("Відновлення:", end.strftime("%H:%M"))
+            print("До відновлення:", duration(end - now))
+            return
 
         if now < start:
-            print("Зараз: за графіком світло є")
-            print("Наступне відключення:", format_time(start, today))
-            print("Відновлення:", format_time(end, today))
-            print("До відключення:", format_duration(start - now))
-            break
+            print("\nЗа графіком світло є.")
+            print("Наступне відключення:", start.strftime("%d.%m %H:%M"))
+            print("Відновлення:", end.strftime("%d.%m %H:%M"))
+            print("До відключення:", duration(start - now))
+            return
 
+    if today["status"] == "NoShutdowns":
+        print("На сьогодні планових відключень немає.")
     else:
-        print("На сьогодні відключення за графіком завершилися.")
+        print("Майбутніх підтверджених відключень не знайдено.")
 
-    print("\nДжерело графіка: ДТЕК")
-    print("Група визначена за локальною базою addresses.json.")
-    print("Фактичні відключення можуть відрізнятися.")
+    if today["possible"]:
+        print("Увага: можливі відключення також є у графіку.")
 
 
 def main():
-    print("=" * 50)
+    print("=" * 45)
     print("ПЕРЕВІРКА ВІДКЛЮЧЕНЬ СВІТЛА - КИЇВ")
-    print("=" * 50)
+    print("=" * 45)
 
     try:
-        street = input("\nВведіть вулицю: ").strip()
-        house = input("Введіть номер будинку: ").strip()
+        addresses = load_addresses()
 
-        if not street or not house:
-            print("Помилка: введіть вулицю та номер будинку.")
+        street = find_street(addresses)
+        house, info = find_house(addresses[street])
+
+        group = get_group(info)
+
+        print(f"\nАдреса: {street}, {house}")
+        print(f"Група YASNO за номером GPV: {group}")
+        print("Увага: відповідність групи не гарантована.")
+
+        print("\nЗавантаження графіка YASNO...")
+
+        schedules = get_schedule()
+
+        if group not in schedules:
+            print("Групу не знайдено в API YASNO.")
             return
 
-        result = find_groups(street, house)
+        group_data = schedules[group]
 
-        if result is None:
-            return
+        if not isinstance(group_data, dict):
+            raise ValueError("Неправильний формат групи.")
 
-        saved_street, saved_house, groups = result
+        today = parse_day(group_data.get("today"))
+        tomorrow = parse_day(group_data.get("tomorrow"))
 
-        if not groups:
-            print("\nДля цієї адреси групу відключень не визначено.")
-            return
+        print("\n" + "=" * 45)
+        print("ГРАФІК ВІДКЛЮЧЕНЬ")
+        print("=" * 45)
 
-        print("\nЗнайдена адреса:", saved_street, saved_house)
-        print("Групи:", ", ".join(groups))
+        show_day("СЬОГОДНІ", today)
+        show_day("ЗАВТРА", tomorrow)
 
-        print("\nЗавантажуємо актуальний графік ДТЕК...")
+        print("\n" + "-" * 45)
+        show_status(today, tomorrow)
 
-        data = get_schedules()
-        today_schedule = get_today_schedule(data)
-
-        if not today_schedule:
-            print("Немає актуального графіка на сьогодні.")
-            return
-
-        today = datetime.now(KYIV_TZ).date()
-
-        for group in groups:
-            hours = today_schedule.get(group)
-
-            if hours is None:
-                print(f"\nГрафік для групи {group} не знайдено.")
-                continue
-
-            outages = calculate_outages(hours, today)
-
-            show_schedule(
-                saved_street,
-                saved_house,
-                group,
-                outages
-            )
+        print("\nДжерело: YASNO")
+        print("Фактичні відключення можуть відрізнятися.")
 
     except FileNotFoundError:
-        print("Помилка: файл addresses.json не знайдено.")
-
-    except json.JSONDecodeError:
-        print("Помилка: неправильний формат JSON.")
+        print("Помилка: addresses.json не знайдено.")
 
     except requests.RequestException as error:
-        print("Помилка підключення до ДТЕК:", error)
+        print("Помилка API YASNO:", error)
 
-    except (ValueError, KeyError, TypeError) as error:
-        print("Помилка обробки даних:", error)
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+        print("Помилка:", error)
+
+    except KeyboardInterrupt:
+        print("\nПрограму зупинено.")
 
 
 if __name__ == "__main__":
